@@ -1,0 +1,27 @@
+# 3D positions of feature points in object frame {o}
+# Each entry is [x, y, z] in metres. Order matches vertex_colors below.
+feature_points:
+  - [ 0.1155,  0.0000, -0.0408]
+  - [-0.0577,  0.1000, -0.0408]
+  - [-0.0577, -0.1000, -0.0408]
+  - [ 0.0000,  0.0000,  0.1225]
+
+# HSV color ranges per vertex, ordered to match feature_points.
+# Each vertex may have one or more ranges (list-of-lists); ranges are OR'd.
+# Format per range: [h_min, s_min, v_min, h_max, s_max, v_max]
+# OpenCV HSV: H in [0,180], S in [0,255], V in [0,255]
+#
+# Ball materials: URP/Lit, S=1.0 in Unity.
+#   Lit shader: shadows lower V but preserve H and S (diffuse-dominant).
+#   → S_min=150 catches shadowed areas; V_min=50 for shadow tolerance.
+#   Note: centroid may still shift slightly toward the light source due to
+#   non-uniform lighting, but S=1.0 (vs previous 0.65) minimises this.
+vertex_colors:
+  # vertex 0: red — Unity H=5/180, S=1, V=1 → OpenCV H≈5
+  - [[0, 150, 50, 12, 255, 255], [168, 150, 50, 180, 255, 255]]
+  # vertex 1: green — Unity H=60/180, S=1, V=1 → OpenCV H≈60
+  - [[52, 150, 50, 68, 255, 255]]
+  # vertex 2: blue — Unity H=115/180, S=1, V=1 → OpenCV H≈115
+  - [[108, 150, 50, 122, 255, 255]]
+  # vertex 3: yellow — Unity H=30/180, S=1, V=1 → OpenCV H≈30
+  - [[24, 150, 50, 36, 255, 255]]

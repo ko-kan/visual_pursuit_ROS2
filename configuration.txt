@@ -1,0 +1,11 @@
+- Modules directory(do not contain ROS2 functions)
+	- Pose class: class that save g, and have method which take dt, v as arguments and show the dynamics of rigid body motion, and relative rigid body motion
+	- Camera class: class that has target's p_oi and functions below
+		- Camera: input is image and returns feature points
+		- Camera model: input is relative pose and returns feature points
+	- utils: class that has functions which is included in Fig 7.4
+- Nodes directory(work in a ROS2 system)
+	- Visual Motion Observer: inputs are V^b_wc, ue and output are errors 
+	- estimation/control error system
+- data directory: contains data about targets p_oi, camera, and so on
+

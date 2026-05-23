@@ -1,0 +1,30 @@
+# Desired pose g_d as 4×4 SE(3) matrix (row-major nested list)
+# Identity rotation, 1 m offset along Z (camera looks at object 1 m away)
+g_d:
+  - [1.0, 0.0, 0.0,  0.0]
+  - [0.0, 1.0, 0.0,  0.0]
+  - [0.0, 0.0, 1.0,  1.0]
+  - [0.0, 0.0, 0.0,  1.0]
+
+# Initial VMO estimate g_0 — SE(3) pose of object in ROS camera frame at t=0.
+# Derived from Unity scene:
+#   DroneCamera: position (0,1,0), quaternion Rx(+90°) → looking straight down (-Y_world)
+#   Tetra:       position (0,0,0), identity rotation
+#
+# Coordinate derivation:
+#   - Camera forward (local Z) = world -Y  → tetra is 1 m along camera Z  →  t = [0,0,1]
+#   - Object frame (targets.yaml, Z-up ROS) mapped to ROS camera (Z-fwd, Y-down):
+#       obj X → cam  X  :  [1, 0, 0]
+#       obj Y → cam -Y  :  [0,-1, 0]   (targets Y = world Z = horizontal; appears upper in image)
+#       obj Z → cam -Z  :  [0, 0,-1]   (targets Z = world Y = up = behind camera)
+g_0:
+  - [1.0,  0.0,  0.0, 0.0]
+  - [0.0, -1.0,  0.0, 0.0]
+  - [0.0,  0.0, -1.0, 1.0]
+  - [0.0,  0.0,  0.0, 1.0]
+
+# Control gain K_c (diagonal entries of 6×6 matrix, eq 7.15)
+Kc: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+# Estimation gain k_e (scalar, used in both VMO and K matrix, eq 7.15)
+ke: 1.0

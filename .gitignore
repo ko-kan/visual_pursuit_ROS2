@@ -1,0 +1,21 @@
+# ROS2 workspace build artifacts
+ros2_workspace/build/
+ros2_workspace/install/
+ros2_workspace/log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+# Claude Code settings
+.claude/
+
+# Generated solution/project files (root level)
+*.sln
+*.slnx
+
+# Vertex database (generated binary data)
+vertex_db/

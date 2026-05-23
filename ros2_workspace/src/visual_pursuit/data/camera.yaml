@@ -1,0 +1,4 @@
+# Camera intrinsics (Unity virtual camera)
+focal_length: 550.0   # pixels (fx = fy assumed equal)
+cx: 320.0             # principal point x
+cy: 240.0             # principal point y
