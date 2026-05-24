@@ -1,7 +1,10 @@
-# ROS2 workspace build artifacts
+# build artifacts
 ros2_workspace/build/
 ros2_workspace/install/
 ros2_workspace/log/
+build/
+install/
+log/
 
 # Python
 __pycache__/
@@ -19,3 +22,6 @@ __pycache__/
 
 # Vertex database (generated binary data)
 vertex_db/
+
+# reference
+*.pdf

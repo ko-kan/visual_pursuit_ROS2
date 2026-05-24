@@ -6,7 +6,7 @@ public class ROS2ObjController : MonoBehaviour
 {
     ROSConnection ros;
     public string topicName    = "/cmd_vel";
-    public float linearScale   = 5.0f;
+    public float linearScale   = 0.5f;
     public float angularScale  = 50.0f;
     // キーを離してからこの秒数後に自動停止 (teleop_twist_keyboard 用)
     public float velocityTimeout = 0.3f;

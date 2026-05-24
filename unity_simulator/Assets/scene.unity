@@ -567,6 +567,9 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ROS2ObjController
   topicName: /cmd_vel
+  linearScale: 0.5
+  angularScale: 50
+  velocityTimeout: 0.3
 --- !u!4 &2075729326
 Transform:
   m_ObjectHideFlags: 0
@@ -595,6 +598,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ColorBallTetraMaker
   ballRadius: 0.02
+  edgeThickness: 0.005
+  edgeColor: {r: 0.8, g: 0.8, b: 0.8, a: 1}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

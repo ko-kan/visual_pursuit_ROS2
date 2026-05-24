@@ -26,6 +26,7 @@ setup(
     entry_points={
         'console_scripts': [
             'vmo_node = nodes.vmo_node:main',
+            'vmo_feedback_node = nodes.vmo_feedback_node:main',
             'error_control_node = nodes.error_control_node:main',
         ],
     },

@@ -17,18 +17,22 @@ from modules.pose import Pose
 
 class VMONode(Node):
     """
-    Visual Motion Observer (VMO).
+    Visual Motion Observer (VMO) — pure observer without internal feedback.
 
     Integrates the observer dynamics (eq 6.9):
         ġ̄ = -V̂^b_wc ḡ - ḡ û_e
 
-    where u_e = k_e * e_e is computed internally from image feature error,
-    closing the feedback loop inside this node without any external pub/sub.
+    u_e is received from an **external** controller via topic
+    ``visual_pursuit/u_e``.  The node is deliberately kept as a pure
+    observer (RRBM Model + Camera Model + J†) so that the feedback gain
+    k_e lives in a separate node, keeping the passivity-based
+    decomposition explicit (Fig 6.12 / Fig 7.4, Hatanaka et al. 2015).
 
     Subscribes
     ----------
-    camera/image_raw     : sensor_msgs/Image   (RGB, from Unity)
-    camera/body_velocity : geometry_msgs/Twist  (body velocity of camera)
+    camera/image_raw            : sensor_msgs/Image          (RGB, from Unity)
+    camera/body_velocity        : geometry_msgs/Twist         (V^b_wc)
+    visual_pursuit/u_e          : std_msgs/Float64MultiArray  u_e ∈ R^6
 
     Publishes
     ---------
@@ -41,6 +45,8 @@ class VMONode(Node):
         self._load_params()
 
         self._g_bar = Pose(self._g_0.copy())
+        # u_e ∈ R^6  (theory notation: u_e = -k_e * e_e, eq 6.22)
+        # Initialised to zero; updated by _cb_u_e when the controller publishes.
         self._u_e = np.zeros(6)
         self._V_wc = np.zeros(6)
         self._f_measured: np.ndarray | None = None
@@ -54,6 +60,10 @@ class VMONode(Node):
         self._sub_vel = self.create_subscription(
             Twist, 'camera/body_velocity', self._cb_velocity, 10)
         self._sub_vel     # prevent GC
+
+        self._sub_ue = self.create_subscription(
+            Float64MultiArray, 'visual_pursuit/u_e', self._cb_u_e, 10)
+        self._sub_ue      # prevent GC
 
         self._pub_pose = self.create_publisher(
             Float64MultiArray, 'visual_pursuit/estimated_pose', 10)
@@ -81,10 +91,13 @@ class VMONode(Node):
             p_oi_list=self._p_oi_list,
             vertex_colors=targets['vertex_colors'],
         )
-        self._ke = float(ctrl['ke'])
         self._g_d = np.array(ctrl['g_d'], dtype=float)
         # VMO 初期推定値。g_0 が未定義なら g_d にフォールバック
         self._g_0 = np.array(ctrl.get('g_0', ctrl['g_d']), dtype=float)
+
+    # ------------------------------------------------------------------
+    # Callbacks
+    # ------------------------------------------------------------------
 
     def _cb_image(self, msg: Image):
         # Unity publishes RGB; convert to BGR and flip vertically
@@ -110,6 +123,19 @@ class VMONode(Node):
             msg.angular.x, msg.angular.y, msg.angular.z,
         ])
 
+    def _cb_u_e(self, msg: Float64MultiArray):
+        """Receive observer correction input u_e ∈ R^6 from the controller.
+
+        Theory convention (eq 6.22): u_e = -k_e * e_e.
+        The observer dynamics (eq 6.9) require V_second = -u_e, so
+        pose.step is called with ``-self._u_e``.
+        """
+        self._u_e = np.array(msg.data, dtype=float)
+
+    # ------------------------------------------------------------------
+    # Observer integration step
+    # ------------------------------------------------------------------
+
     def _step(self):
         now = self.get_clock().now().nanoseconds
         if self._last_ns is None:
@@ -131,11 +157,11 @@ class VMONode(Node):
         J = image_jacobian(g_bar, self._p_oi_list)
         e_e = image_jacobian_pinv(J) @ f_e
 
-        # Observer correction input (internal; never published as a topic)
-        self._u_e = self._ke * e_e
-
-        # Integrate observer: ġ̄ = -V̂_wc ḡ - ḡ V̂(u_e)
-        self._g_bar.step(dt, self._V_wc, self._u_e)
+        # Integrate observer: ġ̄ = -V̂_wc ḡ - ḡ V̂(u_e)   (eq 6.9)
+        # pose.step(dt, V_wc, V_second) computes:
+        #   g_dot = -wedge(V_wc) @ g + g @ wedge(V_second)
+        # For eq 6.9 we need V_second = -u_e.
+        self._g_bar.step(dt, self._V_wc, -self._u_e)
 
         if self._latest_img is not None:
             self._show_debug(self._latest_img, self._f_measured)
@@ -147,6 +173,9 @@ class VMONode(Node):
         ee_msg.data = e_e.tolist()
         self._pub_ee.publish(ee_msg)
 
+    # ------------------------------------------------------------------
+    # Debug visualisation
+    # ------------------------------------------------------------------
 
     # 四面体の全辺 (頂点インデックスのペア)
     _TETRA_EDGES = [(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)]

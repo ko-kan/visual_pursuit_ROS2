@@ -13,14 +13,20 @@ from modules.se3 import inv_se3, vec
 
 class ErrorControlNode(Node):
     """
-    Estimation/Control Error System (Fig 7.4).
+    Estimation/Control Error System (Fig 7.4, Hatanaka et al. 2015).
 
     Computes errors, assembles ν = N e, and applies the control law
         u = -K ν   (eq 7.15)
     where K = diag(K_c, k_e I_6) and ν = [ν_c; ν_e] ∈ R^12.
 
-    Only u_c = -K_c ν_c (first 6 components) is published as the robot
-    velocity command. The VMO handles u_e independently.
+    Both u_c and u_e are extracted from u and published:
+
+      u_c = u[:6]  — camera body-velocity command (sent to the robot)
+      u_e = u[6:]  — observer correction input    (sent back to VMONode)
+
+    Publishing u_e closes the feedback loop of the Visual Motion Observer
+    externally, keeping VMONode as a pure observer consistent with the
+    passivity-based decomposition in Fig 6.12 / Fig 7.4.
 
     Subscribes
     ----------
@@ -30,6 +36,7 @@ class ErrorControlNode(Node):
     Publishes
     ---------
     visual_pursuit/control_output : Float64MultiArray  u_c ∈ R^6
+    visual_pursuit/u_e            : Float64MultiArray  u_e ∈ R^6
     visual_pursuit/output_nu      : Float64MultiArray  ν ∈ R^12  (for monitoring)
     """
 
@@ -49,6 +56,8 @@ class ErrorControlNode(Node):
 
         self._pub_uc = self.create_publisher(
             Float64MultiArray, 'visual_pursuit/control_output', 10)
+        self._pub_ue = self.create_publisher(
+            Float64MultiArray, 'visual_pursuit/u_e', 10)
         self._pub_nu = self.create_publisher(
             Float64MultiArray, 'visual_pursuit/output_nu', 10)
 
@@ -90,11 +99,21 @@ class ErrorControlNode(Node):
 
         # Control law (eq 7.15): u = -K ν
         u = -self._K @ nu
+
+        # u_c: camera velocity command (sent to robot)
         u_c = u[:6]
+        # u_e: observer correction input (sent back to VMO, eq 6.22 / 7.15)
+        #   u_e = -k_e ν_e = -k_e (-Ad e_c + e_e)
+        #   When e_c = 0 this reduces to u_e = -k_e e_e (pure observer case).
+        u_e = u[6:]
 
         uc_msg = Float64MultiArray()
         uc_msg.data = u_c.tolist()
         self._pub_uc.publish(uc_msg)
+
+        ue_msg = Float64MultiArray()
+        ue_msg.data = u_e.tolist()
+        self._pub_ue.publish(ue_msg)
 
         nu_msg = Float64MultiArray()
         nu_msg.data = nu.tolist()
