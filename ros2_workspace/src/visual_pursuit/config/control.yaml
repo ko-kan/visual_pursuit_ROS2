@@ -1,10 +1,10 @@
 # Desired pose g_d as 4×4 SE(3) matrix (row-major nested list)
 # Identity rotation, 1 m offset along Z (camera looks at object 1 m away)
 g_d:
-  - [1.0, 0.0, 0.0,  0.0]
-  - [0.0, -1.0, 0.0,  0.0]
-  - [0.0, 0.0, -1.0,  1.0]
-  - [0.0, 0.0, 0.0,  1.0]
+  - [1.0,  0.0,  0.0, 0.0]
+  - [0.0, -0.5,  -0.865, 0.0]
+  - [0.0,  0.865, -0.5, 1.0]
+  - [0.0,  0.0,  0.0, 1.0]
 
 # Initial VMO estimate g_0 — SE(3) pose of object in ROS camera frame at t=0.
 # Derived from Unity scene:
