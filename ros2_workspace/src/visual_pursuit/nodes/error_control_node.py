@@ -5,10 +5,11 @@ import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
+from geometry_msgs.msg import Twist
 from std_msgs.msg import Float64MultiArray
 
 from modules.jacobian import N_matrix
-from modules.se3 import inv_se3, vec
+from modules.se3 import Ad, inv_se3, vec
 
 
 class ErrorControlNode(Node):
@@ -35,9 +36,13 @@ class ErrorControlNode(Node):
 
     Publishes
     ---------
-    visual_pursuit/control_output : Float64MultiArray  u_c ∈ R^6
+    visual_pursuit/control_output : Float64MultiArray  V^b_wc ∈ R^6
+                                      True camera body velocity after applying
+                                      V^b_wc = -Ad(g_d) · u_c  (eq 7.7 / Fig 7.3)
     visual_pursuit/u_e            : Float64MultiArray  u_e ∈ R^6
     visual_pursuit/output_nu      : Float64MultiArray  ν ∈ R^12  (for monitoring)
+    camera/body_velocity          : geometry_msgs/Twist  V^b_wc (same values as
+                                      control_output but in Twist format for VMO)
     """
 
     def __init__(self):
@@ -60,6 +65,8 @@ class ErrorControlNode(Node):
             Float64MultiArray, 'visual_pursuit/u_e', 10)
         self._pub_nu = self.create_publisher(
             Float64MultiArray, 'visual_pursuit/output_nu', 10)
+        self._pub_bv = self.create_publisher(
+            Twist, 'camera/body_velocity', 10)
 
     def _load_params(self):
         pkg = get_package_share_directory('visual_pursuit')
@@ -100,16 +107,30 @@ class ErrorControlNode(Node):
         # Control law (eq 7.15): u = -K ν
         u = -self._K @ nu
 
-        # u_c: camera velocity command (sent to robot)
+        # u_c: abstract camera control signal
         u_c = u[:6]
         # u_e: observer correction input (sent back to VMO, eq 6.22 / 7.15)
         #   u_e = -k_e ν_e = -k_e (-Ad e_c + e_e)
         #   When e_c = 0 this reduces to u_e = -k_e e_e (pure observer case).
         u_e = u[6:]
 
-        uc_msg = Float64MultiArray()
-        uc_msg.data = u_c.tolist()
-        self._pub_uc.publish(uc_msg)
+        # V^b_wc = -Ad(g_d) · u_c  (eq 7.7 / Fig 7.3)
+        # Publish the true camera body velocity so the Unity side needs no Ad math.
+        V_wc = -Ad(self._g_d) @ u_c
+
+        vc_msg = Float64MultiArray()
+        vc_msg.data = V_wc.tolist()
+        self._pub_uc.publish(vc_msg)
+
+        # camera/body_velocity (Twist) — same V^b_wc for VMO feedback
+        twist = Twist()
+        twist.linear.x  = V_wc[0]
+        twist.linear.y  = V_wc[1]
+        twist.linear.z  = V_wc[2]
+        twist.angular.x = V_wc[3]
+        twist.angular.y = V_wc[4]
+        twist.angular.z = V_wc[5]
+        self._pub_bv.publish(twist)
 
         ue_msg = Float64MultiArray()
         ue_msg.data = u_e.tolist()

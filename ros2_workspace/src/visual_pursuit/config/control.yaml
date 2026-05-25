@@ -2,8 +2,8 @@
 # Identity rotation, 1 m offset along Z (camera looks at object 1 m away)
 g_d:
   - [1.0, 0.0, 0.0,  0.0]
-  - [0.0, 1.0, 0.0,  0.0]
-  - [0.0, 0.0, 1.0,  1.0]
+  - [0.0, -1.0, 0.0,  0.0]
+  - [0.0, 0.0, -1.0,  1.0]
   - [0.0, 0.0, 0.0,  1.0]
 
 # Initial VMO estimate g_0 — SE(3) pose of object in ROS camera frame at t=0.
@@ -27,4 +27,4 @@ g_0:
 Kc: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 # Estimation gain k_e (scalar, used in both VMO and K matrix, eq 7.15)
-ke: 1.0
+ke: 2.0

@@ -137,6 +137,7 @@ class VMONode(Node):
     # ------------------------------------------------------------------
 
     def _step(self):
+        print(1)
         now = self.get_clock().now().nanoseconds
         if self._last_ns is None:
             self._last_ns = now
