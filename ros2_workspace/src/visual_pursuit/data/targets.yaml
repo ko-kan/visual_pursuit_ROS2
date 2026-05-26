@@ -22,6 +22,8 @@ vertex_colors:
   # vertex 1: green — Unity H=60/180, S=1, V=1 → OpenCV H≈60
   - [[52, 150, 50, 68, 255, 255]]
   # vertex 2: blue — Unity H=115/180, S=1, V=1 → OpenCV H≈115
-  - [[108, 150, 50, 122, 255, 255]]
+  # S_min=180: rejects low-saturation sky (typically S≈80–150) while keeping
+  # the vertex ball (Unity S=1.0 → OpenCV S≈255, even in shadow S>180).
+  - [[108, 180, 50, 122, 255, 255]]
   # vertex 3: yellow — Unity H=30/180, S=1, V=1 → OpenCV H≈30
   - [[24, 150, 50, 36, 255, 255]]

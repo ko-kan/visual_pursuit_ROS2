@@ -2,6 +2,7 @@ import os
 
 import numpy as np
 import rclpy
+import scipy.optimize as opt
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
@@ -9,7 +10,7 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import Float64MultiArray
 
 from modules.jacobian import N_matrix
-from modules.se3 import Ad, inv_se3, vec
+from modules.se3 import Ad, inv_se3, skew, vec
 
 
 class ErrorControlNode(Node):
@@ -17,32 +18,46 @@ class ErrorControlNode(Node):
     Estimation/Control Error System (Fig 7.4, Hatanaka et al. 2015).
 
     Computes errors, assembles ν = N e, and applies the control law
-        u = -K ν   (eq 7.15)
+        u_nom = -K ν   (eq 7.15)
     where K = diag(K_c, k_e I_6) and ν = [ν_c; ν_e] ∈ R^12.
 
-    Both u_c and u_e are extracted from u and published:
+    The nominal camera control u_c_nom is then filtered by a **CBF-QP
+    safety layer** (when enabled) based on Kanno et al. (Appl. Sci. 2024):
 
-      u_c = u[:6]  — camera body-velocity command (sent to the robot)
-      u_e = u[6:]  — observer correction input    (sent back to VMONode)
+        u_c_safe = argmin_{u_c} ½ ‖u_c − u_c_nom‖²
+                   s.t.  L_f h_i + L_g h_i · u_c + α h_i(x) ≥ 0   ∀ i
 
-    Publishing u_e closes the feedback loop of the Visual Motion Observer
-    externally, keeping VMONode as a pure observer consistent with the
-    passivity-based decomposition in Fig 6.12 / Fig 7.4.
+    Two barrier functions from the paper are implemented:
+
+    [1] Field-of-View maintenance  (Theorem 1, eq. 28):
+            h_fov = p_co^T T_M p_co − Δ_fov  ≥ 0
+        where T_M = diag(−1/tan²φ_M, −1/tan²φ_M, 1),  φ_M < actual half-FoV.
+        State:  p_co = ḡ[:3, 3]  (estimated object position in camera frame)
+
+    [2] Occlusion Avoidance  (Theorem 2, eq. 34, sphere-obstacle approximation):
+            h_occ,k = l_c,k + l_o,k − ‖p_co‖ − γ/‖p_co‖ − Δ_occ  ≥ 0
+        where l_c,k = ‖p_wc − c_k‖ − r_k  (camera–obstacle clearance)
+              l_o,k = ‖p_wo − c_k‖ − r_k  (target–obstacle clearance)
+        State:  p_wc, p_wo  (absolute positions, world frame)
+        ⟹ Requires camera absolute pose via topic  camera/absolute_pose
+
+    The observer correction u_e is not modified by the CBF.
 
     Subscribes
     ----------
-    visual_pursuit/estimated_pose   : Float64MultiArray  4×4 row-major (16)
+    visual_pursuit/estimated_pose   : Float64MultiArray  ḡ  4×4 row-major (16)
     visual_pursuit/estimation_error : Float64MultiArray  e_e ∈ R^6
+    camera/absolute_pose            : Float64MultiArray  g_wc 4×4 row-major (16)
+                                        Camera pose in world frame (for occlusion CBF).
+                                        Occlusion constraints are skipped if not received.
 
     Publishes
     ---------
     visual_pursuit/control_output : Float64MultiArray  V^b_wc ∈ R^6
-                                      True camera body velocity after applying
-                                      V^b_wc = -Ad(g_d) · u_c  (eq 7.7 / Fig 7.3)
     visual_pursuit/u_e            : Float64MultiArray  u_e ∈ R^6
-    visual_pursuit/output_nu      : Float64MultiArray  ν ∈ R^12  (for monitoring)
-    camera/body_velocity          : geometry_msgs/Twist  V^b_wc (same values as
-                                      control_output but in Twist format for VMO)
+    visual_pursuit/output_nu      : Float64MultiArray  ν ∈ R^12  (monitoring)
+    visual_pursuit/cbf_values     : Float64MultiArray  [h_fov, h_occ_0, …] (monitoring)
+    camera/body_velocity          : geometry_msgs/Twist  V^b_wc (for VMO)
     """
 
     def __init__(self):
@@ -50,7 +65,8 @@ class ErrorControlNode(Node):
         self._load_params()
 
         self._g_bar = np.eye(4)
-        self._e_e = np.zeros(6)
+        self._e_e   = np.zeros(6)
+        self._g_wc  = None     # camera absolute pose g_wc ∈ SE(3), None until received
 
         self.create_subscription(
             Float64MultiArray,
@@ -58,15 +74,27 @@ class ErrorControlNode(Node):
         self.create_subscription(
             Float64MultiArray,
             'visual_pursuit/estimation_error', self._cb_ee, 10)
+        self.create_subscription(
+            Float64MultiArray,
+            'camera/absolute_pose', self._cb_abs_pose, 10)
+        self.create_subscription(
+            Float64MultiArray,
+            'environment/obstacles', self._cb_obstacles, 10)
 
-        self._pub_uc = self.create_publisher(
+        self._pub_uc  = self.create_publisher(
             Float64MultiArray, 'visual_pursuit/control_output', 10)
-        self._pub_ue = self.create_publisher(
+        self._pub_ue  = self.create_publisher(
             Float64MultiArray, 'visual_pursuit/u_e', 10)
-        self._pub_nu = self.create_publisher(
+        self._pub_nu  = self.create_publisher(
             Float64MultiArray, 'visual_pursuit/output_nu', 10)
-        self._pub_bv = self.create_publisher(
+        self._pub_cbf = self.create_publisher(
+            Float64MultiArray, 'visual_pursuit/cbf_values', 10)
+        self._pub_bv  = self.create_publisher(
             Twist, 'camera/body_velocity', 10)
+
+    # ------------------------------------------------------------------
+    # Parameter loading
+    # ------------------------------------------------------------------
 
     def _load_params(self):
         pkg = get_package_share_directory('visual_pursuit')
@@ -87,6 +115,52 @@ class ErrorControlNode(Node):
             [np.zeros((6, 6)), ke * np.eye(6)],
         ])  # 12×12
 
+        # --- CBF parameters (Kanno et al. 2024) ----------------------
+        cbf = ctrl.get('cbf', {})
+        self._cbf_enabled = bool(cbf.get('enabled', False))
+        self._cbf_alpha   = float(cbf.get('alpha', 1.0))
+
+        # [1] FoV maintenance (eq. 28)
+        phi_M = float(cbf.get('phi_M', np.pi / 4))     # design half-angle [rad]
+        self._T_M      = np.diag([
+            -1.0 / np.tan(phi_M) ** 2,
+            -1.0 / np.tan(phi_M) ** 2,
+            1.0,
+        ])
+        self._delta_fov = float(cbf.get('delta_fov', 1.0))
+
+        # [2] Occlusion avoidance (eq. 34)
+        self._gamma     = float(cbf.get('gamma',     1e-4))
+        self._delta_occ = float(cbf.get('delta_occ', 0.2))
+
+        # Obstacles — list of {center: [x,y,z], radius: r}
+        self._obstacles = []
+        for obs in cbf.get('obstacles', []):
+            self._obstacles.append({
+                'center': np.array(obs['center'], dtype=float),
+                'radius': float(obs['radius']),
+            })
+
+        if self._cbf_enabled:
+            self.get_logger().info(
+                f'[CBF] enabled  α={self._cbf_alpha}  '
+                f'φ_M={np.degrees(phi_M):.1f}°  Δ_fov={self._delta_fov}  '
+                f'γ={self._gamma}  Δ_occ={self._delta_occ}  '
+                f'n_obstacles={len(self._obstacles)}'
+            )
+            if self._obstacles:
+                for i, obs in enumerate(self._obstacles):
+                    self.get_logger().info(
+                        f'[CBF]  obs[{i}] center={obs["center"].tolist()}  '
+                        f'r={obs["radius"]}'
+                    )
+            else:
+                self.get_logger().info('[CBF]  no obstacles — only h_fov active')
+
+    # ------------------------------------------------------------------
+    # Subscriptions
+    # ------------------------------------------------------------------
+
     def _cb_pose(self, msg: Float64MultiArray):
         self._g_bar = np.array(msg.data).reshape(4, 4)
         self._compute_and_publish()
@@ -94,36 +168,298 @@ class ErrorControlNode(Node):
     def _cb_ee(self, msg: Float64MultiArray):
         self._e_e = np.array(msg.data)
 
-    def _compute_and_publish(self):
-        # Control error: g_ce = g_d^{-1} ḡ
-        g_ce = inv_se3(self._g_d) @ self._g_bar
-        e_c = vec(g_ce)
+    def _cb_abs_pose(self, msg: Float64MultiArray):
+        """Receive camera absolute pose g_wc ∈ SE(3) (world frame)."""
+        self._g_wc = np.array(msg.data).reshape(4, 4)
 
-        # Error vector and output (eq 7.9)
-        e = np.concatenate([e_c, self._e_e])
-        N = N_matrix(g_ce)
+    def _cb_obstacles(self, msg: Float64MultiArray):
+        """Receive obstacle list from Unity (environment/obstacles).
+
+        Message layout: [N, cx0, cy0, cz0, r0,  cx1, cy1, cz1, r1, ...]
+        Positions are in ROS world frame (converted by ObstaclePublisher.cs).
+        Overrides the static obstacle list from control.yaml while CBF is enabled.
+        """
+        if not self._cbf_enabled:
+            return
+
+        data = msg.data
+        if len(data) < 1:
+            return
+
+        n = int(data[0])
+        if len(data) < 1 + 4 * n:
+            self.get_logger().warn(
+                f'[CBF] environment/obstacles: expected {1 + 4*n} values, '
+                f'got {len(data)}. Ignoring.',
+                throttle_duration_sec=2.0,
+            )
+            return
+
+        new_obs = []
+        for i in range(n):
+            base = 1 + 4 * i
+            new_obs.append({
+                'center': np.array(data[base:base + 3], dtype=float),
+                'radius': float(data[base + 3]),
+            })
+
+        # numpy 配列を含む dict リストは != で比較できないため件数変化のみ記録
+        prev_n = len(self._obstacles)
+        self._obstacles = new_obs
+        if n != prev_n:
+            self.get_logger().info(
+                f'[CBF] obstacles updated from Unity: {n} obstacle(s)',
+            )
+
+    # ------------------------------------------------------------------
+    # CBF barrier functions  (Kanno et al. 2024)
+    # ------------------------------------------------------------------
+
+    def _barrier_fov(self, p_co: np.ndarray):
+        """
+        Field-of-View maintenance barrier  (Theorem 1, eq. 28).
+
+            h_fov = p_co^T T_M p_co − Δ_fov
+
+        Time derivative (eq. 30):
+            ḣ_fov = 2 p_co^T T_M ṗ_co
+                  = 2 p_co^T T_M (R_co v_wo^b − v_wc^b − ω_wc^b × p_co)
+
+        L_f h_fov = 2 p_co^T T_M R_co v_wo^b  ≈ 0  (target-velocity unknown)
+
+        L_g h_fov w.r.t. V_wc = [v_wc^b; ω_wc^b]:
+            = 2 p_co^T T_M (−v_wc^b + skew(p_co) ω_wc^b)
+            = −2 (T_M p_co)^T [I₃ | −skew(p_co)] V_wc
+
+        Transformed to u_c via  V_wc = −Ad(g_d) u_c:
+            L_g h_fov · u_c = 2 (T_M p_co)^T [I₃ | −skew(p_co)] Ad(g_d) u_c
+
+        Returns
+        -------
+        h   : float   barrier value
+        A   : (6,)    row vector s.t. constraint is  A @ u_c + α h ≥ 0
+        """
+        h = float(p_co @ self._T_M @ p_co) - self._delta_fov
+
+        # L_g h_fov w.r.t. V_wc
+        J_p      = np.hstack([np.eye(3), -skew(p_co)])          # 3×6
+        Lgh_Vwc  = -2.0 * (self._T_M @ p_co) @ J_p              # (6,) row
+
+        # Transform: V_wc = −Ad(g_d) u_c  ⟹  L_g h · u_c = Lgh_Vwc @ (−Ad(g_d))
+        A = Lgh_Vwc @ (-Ad(self._g_d))                          # (6,)
+        return h, A
+
+    def _barrier_occ_k(self, p_co: np.ndarray, obs: dict):
+        """
+        Occlusion-avoidance barrier for obstacle k  (Theorem 2, eq. 34).
+
+        Sphere-obstacle approximation:
+            l_c,k = ‖p_wc − c_k‖ − r_k
+            l_o,k = ‖p_wo − c_k‖ − r_k
+            h_occ,k = l_c,k + l_o,k − ‖p_co‖ − γ/‖p_co‖ − Δ_occ
+
+        Time derivative (static target, ṗ_wo = 0):
+            ḣ_occ,k = ė_c,k-contrib + 0 − d/dt‖p_co‖ − d/dt(γ/‖p_co‖)
+
+            Each term (p_co in camera frame, ṗ_co = −v^b_wc − ω^b_wc × p_co):
+
+            d/dt l_c,k  = e_{c,k}^T Ṙ_wc ... = e_{c,k}^T R_wc v^b_wc
+            d/dt l_o,k  = 0                          (static target)
+            d/dt ‖p_co‖ = p̂_co^T ṗ_co             = −p̂_co^T v^b_wc
+                           (ω term ⊥ p_co → vanishes)
+            d/dt(γ/‖p_co‖) = (γ/‖p_co‖²) p̂_co^T v^b_wc
+
+            ∴  ḣ_occ,k = [e_{c,k}^T R_wc + β p̂_co^T | 0₃^T] V^b_wc
+
+            where  p̂_co = p_co / ‖p_co‖   (camera frame unit vector)
+                   β    = 1 − γ/‖p_co‖²
+
+        NOTE: e_co = (p_wc − p_wo)/‖p_co‖ = −R_wc p̂_co, so
+              (e_c,k + β e_co)^T R_wc  = e_c,k^T R_wc − β p̂_co^T  ← wrong sign.
+              The correct Lie derivative uses p̂_co directly in camera frame.
+
+        Transformed to u_c via  V^b_wc = −Ad(g_d) u_c:
+            A = [e_{c,k}^T R_wc + β p̂_co^T | 0₃^T] (−Ad(g_d))
+
+        L_f h_occ,k  ≈ 0  (target velocity unknown; conservative)
+
+        Returns (None, None) when g_wc not yet received or geometry degenerate.
+
+        Parameters
+        ----------
+        p_co : (3,) object position in camera frame  (= ḡ[:3, 3])
+        obs  : dict with 'center' (3,) and 'radius' float  (world frame)
+        """
+        if self._g_wc is None:
+            return None, None
+
+        p_wc = self._g_wc[:3, 3]
+        R_wc = self._g_wc[:3, :3]
+        p_wo = p_wc + R_wc @ p_co          # object position in world frame
+
+        c_k  = obs['center']
+        r_k  = obs['radius']
+
+        d_c = np.linalg.norm(p_wc - c_k)
+        d_o = np.linalg.norm(p_wo - c_k)
+
+        if d_c < 1e-6 or d_o < 1e-6:      # degenerate: inside or on obstacle
+            return None, None
+
+        l_c_k = d_c - r_k
+        l_o_k = d_o - r_k
+
+        p_co_norm = np.linalg.norm(p_co)   # ‖p_co‖ (rotation-invariant)
+
+        if p_co_norm < 1e-6:
+            return None, None
+
+        h = l_c_k + l_o_k - p_co_norm - self._gamma / p_co_norm - self._delta_occ
+
+        # Unit vectors
+        e_c_k    = (p_wc - c_k) / d_c          # world frame: obstacle → camera
+        hat_p_co = p_co / p_co_norm             # camera frame: camera → object
+        beta     = 1.0 - self._gamma / p_co_norm ** 2
+
+        # L_g h_occ,k w.r.t. V^b_wc = [v^b_wc; ω^b_wc]
+        #   translational: e_{c,k}^T R_wc + β p̂_co^T  (both are coeff of v^b_wc)
+        #   angular:       0₃^T
+        a        = e_c_k @ R_wc + beta * hat_p_co   # (3,) in camera frame
+        Lgh_Vwc  = np.concatenate([a, np.zeros(3)])  # (6,)
+
+        # Transform: V^b_wc = −Ad(g_d) u_c
+        A = Lgh_Vwc @ (-Ad(self._g_d))              # (6,)
+        return h, A
+
+    # ------------------------------------------------------------------
+    # CBF-QP safety filter
+    # ------------------------------------------------------------------
+
+    def _collect_constraints(self, g_bar: np.ndarray) -> list:
+        """Collect all active CBF constraints.
+
+        Returns list of dicts with:
+            'h'    : float  — barrier value
+            'A'    : (6,)   — gradient s.t. constraint is  A @ u_c + α h ≥ 0
+            'name' : str
+        """
+        p_co = g_bar[:3, 3]
+
+        if np.linalg.norm(p_co) < 1e-6:
+            return []
+
+        cons = []
+
+        # [1] Field-of-view maintenance
+        h_fov, A_fov = self._barrier_fov(p_co)
+        cons.append({'h': h_fov, 'A': A_fov, 'name': 'h_fov'})
+
+        # [2] Occlusion avoidance (one constraint per obstacle)
+        for i, obs in enumerate(self._obstacles):
+            print(obs)
+            h_occ, A_occ = self._barrier_occ_k(p_co, obs)
+            if h_occ is not None:
+                cons.append({'h': h_occ, 'A': A_occ, 'name': f'h_occ_{i}'})
+
+        return cons
+
+    def _apply_cbf_qp(self, u_c_nom: np.ndarray, g_bar: np.ndarray
+                      ) -> np.ndarray:
+        """CBF-QP safety filter  (eq. 42, Kanno et al. 2024).
+
+        Solves:
+            min_{u_c}  ½ ‖u_c − u_c_nom‖²
+            s.t.       A_i @ u_c + α h_i(x) ≥ 0   for each barrier i
+
+        Falls back to u_c_nom if all constraints are satisfied or solver fails.
+        """
+        cons = self._collect_constraints(g_bar)
+        if not cons:
+            return u_c_nom
+
+        # Fast path: nominal already safe
+        alpha = self._cbf_alpha
+        if all(c['A'] @ u_c_nom + alpha * c['h'] >= 0.0 for c in cons):
+            return u_c_nom
+
+        # Log violations
+        for c in cons:
+            val = c['A'] @ u_c_nom + alpha * c['h']
+            if val < 0.0:
+                self.get_logger().warn(
+                    f"[CBF] '{c['name']}' violated  "
+                    f"h={c['h']:.4f}  A·u+αh={val:.4f}",
+                    throttle_duration_sec=0.5,
+                )
+
+        sc_cons = [
+            {
+                'type': 'ineq',
+                'fun':  lambda uc, c=c: c['A'] @ uc + alpha * c['h'],
+                'jac':  lambda uc, c=c: c['A'],
+            }
+            for c in cons
+        ]
+
+        result = opt.minimize(
+            fun=lambda uc: 0.5 * float(np.dot(uc - u_c_nom, uc - u_c_nom)),
+            x0=u_c_nom.copy(),
+            jac=lambda uc: uc - u_c_nom,
+            constraints=sc_cons,
+            method='SLSQP',
+            options={'ftol': 1e-9, 'maxiter': 200, 'disp': False},
+        )
+
+        if result.success or result.status in (0, 1):
+            return result.x
+
+        self.get_logger().warn(
+            f'[CBF-QP] solver failed (status={result.status}): {result.message}',
+            throttle_duration_sec=1.0,
+        )
+        return u_c_nom   # fallback
+
+    # ------------------------------------------------------------------
+    # Main control loop
+    # ------------------------------------------------------------------
+
+    def _compute_and_publish(self):
+        # Control error  g_ce = g_d^{-1} ḡ
+        g_ce = inv_se3(self._g_d) @ self._g_bar
+        e_c  = vec(g_ce)
+
+        # Error vector and output  (eq 7.9)
+        e  = np.concatenate([e_c, self._e_e])
+        N  = N_matrix(g_ce)
         nu = N @ e
 
-        # Control law (eq 7.15): u = -K ν
-        u = -self._K @ nu
+        # Nominal control law  (eq 7.15):  u_nom = −K ν
+        u_nom   = -self._K @ nu
+        u_c_nom = u_nom[:6]
+        u_e     = u_nom[6:]   # observer correction — not modified by CBF
 
-        # u_c: abstract camera control signal
-        u_c = u[:6]
-        # u_e: observer correction input (sent back to VMO, eq 6.22 / 7.15)
-        #   u_e = -k_e ν_e = -k_e (-Ad e_c + e_e)
-        #   When e_c = 0 this reduces to u_e = -k_e e_e (pure observer case).
-        u_e = u[6:]
+        # ------ CBF-QP safety filter on u_c --------------------------
+        if self._cbf_enabled:
+            u_c = self._apply_cbf_qp(u_c_nom, self._g_bar)
 
-        # V^b_wc = -Ad(g_d) · u_c  (eq 7.7 / Fig 7.3)
-        # Publish the true camera body velocity so the Unity side needs no Ad math.
+            # Publish barrier values for monitoring
+            cbf_cons = self._collect_constraints(self._g_bar)
+            cbf_msg  = Float64MultiArray()
+            cbf_msg.data = [float(c['h']) for c in cbf_cons]
+            self._pub_cbf.publish(cbf_msg)
+        else:
+            u_c = u_c_nom
+        # --------------------------------------------------------------
+
+        # V^b_wc = −Ad(g_d) u_c  (eq 7.7 / Fig 7.3)
         V_wc = -Ad(self._g_d) @ u_c
 
-        vc_msg = Float64MultiArray()
+        vc_msg      = Float64MultiArray()
         vc_msg.data = V_wc.tolist()
         self._pub_uc.publish(vc_msg)
 
-        # camera/body_velocity (Twist) — same V^b_wc for VMO feedback
-        twist = Twist()
+        # camera/body_velocity (Twist) — same V^b_wc for VMO
+        twist           = Twist()
         twist.linear.x  = V_wc[0]
         twist.linear.y  = V_wc[1]
         twist.linear.z  = V_wc[2]
@@ -132,11 +468,11 @@ class ErrorControlNode(Node):
         twist.angular.z = V_wc[5]
         self._pub_bv.publish(twist)
 
-        ue_msg = Float64MultiArray()
+        ue_msg      = Float64MultiArray()
         ue_msg.data = u_e.tolist()
         self._pub_ue.publish(ue_msg)
 
-        nu_msg = Float64MultiArray()
+        nu_msg      = Float64MultiArray()
         nu_msg.data = nu.tolist()
         self._pub_nu.publish(nu_msg)
 

@@ -3,7 +3,7 @@
 g_d:
   - [1.0,  0.0,  0.0, 0.0]
   - [0.0, -0.5,  -0.865, 0.0]
-  - [0.0,  0.865, -0.5, 1.0]
+  - [0.0,  0.865, -0.5, 2.0]
   - [0.0,  0.0,  0.0, 1.0]
 
 # Initial VMO estimate g_0 — SE(3) pose of object in ROS camera frame at t=0.
@@ -28,3 +28,54 @@ Kc: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 # Estimation gain k_e (scalar, used in both VMO and K matrix, eq 7.15)
 ke: 2.0
+
+# -----------------------------------------------------------------------
+# Control Barrier Function (CBF) — QP-based safety filter
+# Kanno, Yamauchi, Fujita — Appl. Sci. 2024, 14, 11544
+# -----------------------------------------------------------------------
+# When enabled, the nominal camera control u_c_nom = -K_c ν_c is filtered
+# by solving:
+#
+#   min_{u_c}  ½ ‖u_c − u_c_nom‖²
+#   s.t.       L_f h_i + L_g h_i · u_c + α · h_i(x) ≥ 0   for each i
+#
+# Two barrier functions (paper Section 3):
+#
+#   h_fov   = p_co^T T_M p_co − Δ_fov  ≥ 0       (FoV maintenance, eq. 28)
+#             T_M = diag(−1/tan²φ_M, −1/tan²φ_M, 1)
+#             State: p_co = estimated object position in camera frame (from VMO)
+#
+#   h_occ,k = l_c,k + l_o,k − ‖p_co‖ − γ/‖p_co‖ − Δ_occ  ≥ 0
+#             (occlusion avoidance w.r.t. obstacle k, eq. 34)
+#             l_c,k = ‖p_wc − c_k‖ − r_k  (camera clearance to obstacle)
+#             l_o,k = ‖p_wo − c_k‖ − r_k  (target clearance to obstacle)
+#             State: p_wc, p_wo  (absolute world positions)
+#             ⟹ Requires topic  camera/absolute_pose  (Float64MultiArray, 4×4 g_wc)
+#
+# The observer correction u_e is NOT modified by the CBF filter.
+# Monitor barrier values via:  ros2 topic echo visual_pursuit/cbf_values
+#   → [h_fov, h_occ_0, h_occ_1, ...]
+# -----------------------------------------------------------------------
+cbf:
+  enabled:   true    # set to true to activate the CBF-QP filter
+  alpha:     1.0      # class-K linear gain: ḣ + α·h ≥ 0
+
+  # [1] FoV maintenance (eq. 28) — uses p_co from VMO, no absolute pose needed
+  phi_M:     0.7854   # φ_M [rad] = π/4 ≈ 45° (design param, must be < actual half-FoV)
+                      # Proposition 1 condition: √(Δ_fov) sin(φ−φ_M)/cos(φ_M) ≥ r_M
+  delta_fov: 1.0      # Δ_fov > 0
+
+  # [2] Occlusion avoidance (eq. 34) — needs camera/absolute_pose topic
+  gamma:     0.0001   # γ ≥ 0, should satisfy γ ≤ 2 k_e / v_max  (Theorem 2)
+  delta_occ: 0.2      # Δ_occ > 2 r_M  (Proposition 2)
+
+  # Obstacles — sphere approximation used in safety layer (Section 4 / eq. 62)
+  # Each entry: { center: [x, y, z],  radius: r }  (world frame, same as Unity)
+  # Leave empty [] if no obstacles (only h_fov will be active).
+  obstacles: []
+  # Example:
+  # obstacles:
+  #   - center: [1.0, 0.0, 3.0]
+  #     radius: 0.5
+  #   - center: [-2.0, 1.0, 2.0]
+  #     radius: 0.3
