@@ -16,17 +16,23 @@ class Camera:
     """
 
     def __init__(self, focal_length: float, cx: float, cy: float,
-                 p_oi_list: list, vertex_colors: list):
+                 p_oi_list: list, vertex_colors: list,
+                 proc_scale: float = 0.5):
         """
+        focal_length, cx, cy : camera intrinsics in ORIGINAL pixel coordinates.
         vertex_colors : list of n_f color range specs, one per vertex.
           Each spec is a list of one or more HSV ranges:
             [[h_min, s_min, v_min, h_max, s_max, v_max], ...]
           Multiple ranges are OR'd together (useful for red hue wraparound).
+        proc_scale : downscale factor applied before feature detection (0 < s ≤ 1).
+          0.5 → 320×240 processing (4× faster), accuracy unchanged for color blobs.
         """
-        self.f = float(focal_length)
+        self.f  = float(focal_length)
         self.cx = float(cx)
         self.cy = float(cy)
+        self._proc_scale = float(proc_scale)
         self.p_oi_list = [np.array(p, dtype=float) for p in p_oi_list]
+
         self._vertex_ranges: list[list[tuple]] = []
         self.vertex_bgr_colors: list[tuple[int, int, int]] = []
         for spec in vertex_colors:
@@ -62,32 +68,56 @@ class Camera:
         """
         Detects feature centroids from a BGR image via HSV color thresholding.
 
-        For each vertex, OR's its HSV ranges into a mask, then returns
-        the centroid of that mask in normalized image coordinates.
+        For each vertex, OR's its HSV ranges into a mask, finds the largest
+        contour, and returns its centroid in normalized image coordinates.
 
-        img_bgr : (H, W, 3) uint8 BGR image
+        速度最適化:
+          - proc_scale < 1.0 のとき検出前にダウンスケール（640×480 → 320×240 等）
+            により色域マスク生成と輪郭検出が大幅に高速化される。
+          - cv2.connectedComponentsWithStats + np.argwhere の代わりに
+            cv2.findContours + cv2.moments を使用。
+            C++ 内で完結するため Python GIL 保持時間が最小になる。
+
+        img_bgr : (H, W, 3) uint8 BGR image (original resolution)
         Returns f ∈ R^{2*n_f} in normalized coordinates, or None if any
         vertex has no pixels matching its color ranges.
         """
-        img_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-        features = []
+        scale = self._proc_scale
+
+        # ── ダウンスケール ─────────────────────────────────────────────
+        if scale < 1.0:
+            small = cv2.resize(img_bgr, None, fx=scale, fy=scale,
+                               interpolation=cv2.INTER_LINEAR)
+        else:
+            small = img_bgr
+
+        img_hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        features: list[float] = []
 
         for ranges in self._vertex_ranges:
-            mask = np.zeros(img_bgr.shape[:2], dtype=np.uint8)
+            # ── マスク生成 ──────────────────────────────────────────────
+            mask = np.zeros(small.shape[:2], dtype=np.uint8)
             for lo, hi in ranges:
-                mask = cv2.bitwise_or(mask, cv2.inRange(img_hsv, lo, hi))
+                cv2.bitwise_or(mask, cv2.inRange(img_hsv, lo, hi), dst=mask)
 
-            # 最大連結成分のみを使用してノイズピクセルを除去
-            n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-                mask, connectivity=8)
-            if n_labels < 2:   # 前景なし
+            # ── 最大輪郭のセントロイド ──────────────────────────────────
+            # connectedComponentsWithStats (全画素ラベリング) の代わりに
+            # findContours + moments を使用。C++ 完結で高速。
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
                 return None
-            largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-            pixels = np.argwhere(labels == largest)   # (N, 2): (row, col)
 
-            v_mean = float(np.mean(pixels[:, 0]))   # row → pixel v
-            u_mean = float(np.mean(pixels[:, 1]))   # col → pixel u
-            features.append((u_mean - self.cx) / self.f)
-            features.append((v_mean - self.cy) / self.f)
+            largest = max(contours, key=cv2.contourArea)
+            M = cv2.moments(largest)
+            if M['m00'] < 1.0:   # 面積がほぼゼロ = 有効な輪郭なし
+                return None
+
+            # スケール後座標をオリジナル画素座標に戻す
+            u = (M['m10'] / M['m00']) / scale
+            v = (M['m01'] / M['m00']) / scale
+
+            features.append((u - self.cx) / self.f)
+            features.append((v - self.cy) / self.f)
 
         return np.array(features)

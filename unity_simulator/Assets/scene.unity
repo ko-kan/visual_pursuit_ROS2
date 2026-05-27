@@ -332,7 +332,7 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 733579611}
-  - component: {fileID: 733579610}
+  - component: {fileID: 733579612}
   m_Layer: 0
   m_Name: ObstacleManager
   m_TagString: Untagged
@@ -340,35 +340,6 @@ GameObject:
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
---- !u!114 &733579610
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 733579609}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 6868c0940815ebc00a7958adbd3c8fe3, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::ObstacleManager
-  obstacles:
-  - label: 
-    position: {x: -1, y: 0.5, z: 0}
-    safetyRadius: 0
-    bodyRadius: 0.1
-    bodyColor: {r: 1, g: 1, b: 1, a: 0.45490196}
-    boundaryColor: {r: 0, g: 0, b: 0, a: 0}
-    showBoundary: 0
-  - label: 
-    position: {x: 0, y: 0.5, z: 1}
-    safetyRadius: 0
-    bodyRadius: 0.1
-    bodyColor: {r: 1, g: 1, b: 1, a: 0.40392157}
-    boundaryColor: {r: 0, g: 0, b: 0, a: 0}
-    showBoundary: 0
-  topicName: environment/obstacles
-  publishHz: 5
 --- !u!4 &733579611
 Transform:
   m_ObjectHideFlags: 0
@@ -384,6 +355,39 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &733579612
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 733579609}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6868c0940815ebc00a7958adbd3c8fe3, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::ObstacleManager
+  obstacles:
+  - label: 
+    shape: 2
+    position: {x: -0.9, y: 0, z: 0}
+    safetyRadius: 0
+    bodyRadius: 0.2
+    height: 0.7
+    bodyColor: {r: 0.5943396, g: 0.5943396, b: 0.5943396, a: 0.14901961}
+    boundaryColor: {r: 0, g: 0, b: 0, a: 0}
+    showBoundary: 0
+  - label: 
+    shape: 2
+    position: {x: 0.9, y: 0, z: 0}
+    safetyRadius: 0
+    bodyRadius: 0.2
+    height: 0.7
+    bodyColor: {r: 0.5754717, g: 0.5754717, b: 0.5754717, a: 0.14117648}
+    boundaryColor: {r: 0, g: 0, b: 0, a: 0}
+    showBoundary: 0
+  topicName: environment/obstacles
+  publishHz: 5
 --- !u!1 &1294379664
 GameObject:
   m_ObjectHideFlags: 0
@@ -597,13 +601,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1457999664}
   serializedVersion: 2
-  m_LocalRotation: {x: 0, y: -0.7071068, z: 0, w: 0.7071068}
-  m_LocalPosition: {x: 1, y: 0.5, z: 0}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: -2}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: -90, z: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!114 &1457999668
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -680,7 +684,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::ROS2ObjController
   topicName: /cmd_vel
   linearScale: 0.5
-  angularScale: 50
+  angularScale: 10
   velocityTimeout: 0.3
 --- !u!4 &2075729326
 Transform:
@@ -691,7 +695,7 @@ Transform:
   m_GameObject: {fileID: 2075729323}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalPosition: {x: 0, y: -0.15, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -709,7 +713,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e3adbeed755a2c507a2f89a1389da755, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ColorBallTetraMaker
-  ballRadius: 0.02
+  ballRadius: 0.04
   edgeThickness: 0.005
   edgeColor: {r: 0.8, g: 0.8, b: 0.8, a: 1}
 --- !u!1660057539 &9223372036854775807

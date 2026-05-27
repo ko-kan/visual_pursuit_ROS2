@@ -2,8 +2,8 @@
 # Identity rotation, 1 m offset along Z (camera looks at object 1 m away)
 g_d:
   - [1.0,  0.0,  0.0, 0.0]
-  - [0.0, -0.5,  -0.865, 0.0]
-  - [0.0,  0.865, -0.5, 2.0]
+  - [0.0, -0.259,  -0.966, 0.0]
+  - [0.0,  0.966, -0.259, 2.0]
   - [0.0,  0.0,  0.0, 1.0]
 
 # Initial VMO estimate g_0 — SE(3) pose of object in ROS camera frame at t=0.
@@ -20,8 +20,22 @@ g_d:
 g_0:
   - [1.0,  0.0,  0.0, 0.0]
   - [0.0, -1.0,  0.0, 0.0]
-  - [0.0,  0.0, -1.0, 1.0]
+  - [0.0,  0.0, -1.0, 1.5]
   - [0.0,  0.0,  0.0, 1.0]
+
+# VMO Predictor integration rate [Hz]
+# g_bar を積分するタイマーの周波数。画像フレームレートより高く設定する。
+integration_hz: 50.0
+
+# error_control_node の制御ループレート [Hz]
+# create_timer で固定。画像レートや VMO レートと独立して動作する。
+control_hz: 5.0
+
+# 特徴点検出レート [Hz]
+# feature_from_image の最大呼び出しレート。画像入力（~30 Hz）より低く
+# 設定することで処理スレッドの負荷を抑える。
+# Observer 補正（u_e）は control_hz で更新されるため 15 Hz で十分。
+image_proc_hz: 5.0
 
 # Control gain K_c (diagonal entries of 6×6 matrix, eq 7.15)
 Kc: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]

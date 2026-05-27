@@ -2,3 +2,7 @@
 focal_length: 550.0   # pixels (fx = fy assumed equal)
 cx: 320.0             # principal point x
 cy: 240.0             # principal point y
+
+# feature_from_image の処理解像度スケール (0 < proc_scale ≤ 1.0)
+# 0.5 = 320×240 で検出 → 約 4× 高速化（色ブロブ検出の精度には影響なし）
+proc_scale: 0.5

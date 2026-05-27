@@ -1,4 +1,5 @@
 import os
+import time
 
 import numpy as np
 import rclpy
@@ -77,7 +78,8 @@ class ErrorControlNode(Node):
         self.create_subscription(
             Float64MultiArray,
             'camera/absolute_pose', self._cb_abs_pose, 10)
-        self.create_subscription(
+        # 静的環境: 最初の1メッセージだけ受け取ったら購読を解除する
+        self._obs_sub = self.create_subscription(
             Float64MultiArray,
             'environment/obstacles', self._cb_obstacles, 10)
 
@@ -92,6 +94,10 @@ class ErrorControlNode(Node):
         self._pub_bv  = self.create_publisher(
             Twist, 'camera/body_velocity', 10)
 
+        # 制御ループタイマー（ROS 標準機能で Hz を固定）
+        self.create_timer(1.0 / self._control_hz, self._compute_and_publish)
+        self.get_logger().info(f'[control] loop rate: {self._control_hz} Hz')
+
     # ------------------------------------------------------------------
     # Parameter loading
     # ------------------------------------------------------------------
@@ -101,6 +107,7 @@ class ErrorControlNode(Node):
         with open(os.path.join(pkg, 'config', 'control.yaml')) as f:
             ctrl = yaml.safe_load(f)
 
+        self._control_hz = float(ctrl.get('control_hz', 5.0))
         self._g_d = np.array(ctrl['g_d'], dtype=float)   # 4×4
 
         Kc_param = ctrl['Kc']
@@ -110,6 +117,7 @@ class ErrorControlNode(Node):
             self._Kc = float(Kc_param) * np.eye(6)
 
         ke = float(ctrl['ke'])
+        self._ke = ke
         self._K = np.block([
             [self._Kc,              np.zeros((6, 6))],
             [np.zeros((6, 6)), ke * np.eye(6)],
@@ -163,7 +171,6 @@ class ErrorControlNode(Node):
 
     def _cb_pose(self, msg: Float64MultiArray):
         self._g_bar = np.array(msg.data).reshape(4, 4)
-        self._compute_and_publish()
 
     def _cb_ee(self, msg: Float64MultiArray):
         self._e_e = np.array(msg.data)
@@ -175,8 +182,10 @@ class ErrorControlNode(Node):
     def _cb_obstacles(self, msg: Float64MultiArray):
         """Receive obstacle list from Unity (environment/obstacles).
 
-        Message layout: [N, cx0, cy0, cz0, r0,  cx1, cy1, cz1, r1, ...]
-        Positions are in ROS world frame (converted by ObstaclePublisher.cs).
+        Message layout: [N, cx0, cy0, cz0, r0, type0,  cx1, cy1, cz1, r1, type1, ...]
+          type: 0.0 = sphere  (3-D distance)
+                1.0 = cylinder (2-D XY horizontal distance, infinite height)
+        Positions are in ROS world frame (converted by ObstacleManager.cs).
         Overrides the static obstacle list from control.yaml while CBF is enabled.
         """
         if not self._cbf_enabled:
@@ -187,9 +196,9 @@ class ErrorControlNode(Node):
             return
 
         n = int(data[0])
-        if len(data) < 1 + 4 * n:
+        if len(data) < 1 + 5 * n:
             self.get_logger().warn(
-                f'[CBF] environment/obstacles: expected {1 + 4*n} values, '
+                f'[CBF] environment/obstacles: expected {1 + 5*n} values, '
                 f'got {len(data)}. Ignoring.',
                 throttle_duration_sec=2.0,
             )
@@ -197,19 +206,22 @@ class ErrorControlNode(Node):
 
         new_obs = []
         for i in range(n):
-            base = 1 + 4 * i
+            base = 1 + 5 * i
             new_obs.append({
                 'center': np.array(data[base:base + 3], dtype=float),
                 'radius': float(data[base + 3]),
+                'type':   'cylinder' if int(round(data[base + 4])) == 1 else 'sphere',
             })
 
-        # numpy 配列を含む dict リストは != で比較できないため件数変化のみ記録
-        prev_n = len(self._obstacles)
         self._obstacles = new_obs
-        if n != prev_n:
-            self.get_logger().info(
-                f'[CBF] obstacles updated from Unity: {n} obstacle(s)',
-            )
+        self.get_logger().info(
+            f'[CBF] obstacles loaded from Unity ({n} obstacle(s)). '
+            f'Unsubscribing — static environment assumed.'
+        )
+
+        # 静的環境なので購読を解除（以降このコールバックは呼ばれない）
+        self.destroy_subscription(self._obs_sub)
+        self._obs_sub = None
 
     # ------------------------------------------------------------------
     # CBF barrier functions  (Kanno et al. 2024)
@@ -297,11 +309,20 @@ class ErrorControlNode(Node):
         R_wc = self._g_wc[:3, :3]
         p_wo = p_wc + R_wc @ p_co          # object position in world frame
 
-        c_k  = obs['center']
-        r_k  = obs['radius']
+        c_k      = obs['center']
+        r_k      = obs['radius']
+        obs_type = obs.get('type', 'sphere')
 
-        d_c = np.linalg.norm(p_wc - c_k)
-        d_o = np.linalg.norm(p_wo - c_k)
+        if obs_type == 'cylinder':
+            # Vertical cylinder: use 2-D XY horizontal distances.
+            # Assumption: cylinder extends infinitely in height (Z direction),
+            # so occlusion is determined solely by the horizontal projection.
+            d_c = np.linalg.norm(p_wc[:2] - c_k[:2])
+            d_o = np.linalg.norm(p_wo[:2] - c_k[:2])
+        else:
+            # Sphere: 3-D Euclidean distance
+            d_c = np.linalg.norm(p_wc - c_k)
+            d_o = np.linalg.norm(p_wo - c_k)
 
         if d_c < 1e-6 or d_o < 1e-6:      # degenerate: inside or on obstacle
             return None, None
@@ -309,15 +330,31 @@ class ErrorControlNode(Node):
         l_c_k = d_c - r_k
         l_o_k = d_o - r_k
 
-        p_co_norm = np.linalg.norm(p_co)   # ‖p_co‖ (rotation-invariant)
+        p_co_norm = np.linalg.norm(p_co)   # ‖p_co‖ (3-D, rotation-invariant)
 
         if p_co_norm < 1e-6:
             return None, None
 
         h = l_c_k + l_o_k - p_co_norm - self._gamma / p_co_norm - self._delta_occ
 
-        # Unit vectors
-        e_c_k    = (p_wc - c_k) / d_c          # world frame: obstacle → camera
+        # ── Gradient e_{c,k}: depends on obstacle shape ──────────────────
+        obs_type = obs.get('type', 'sphere')
+
+        if obs_type == 'cylinder':
+            # Vertical cylinder: distance = 2-D XY horizontal distance.
+            # Gradient has zero Z component (height direction irrelevant).
+            #   ∂l_c,k/∂p_wc = [ex, ey, 0]   (world frame)
+            diff_c_xy  = p_wc[:2] - c_k[:2]
+            d_c_xy     = np.linalg.norm(diff_c_xy)
+            if d_c_xy < 1e-6:
+                return None, None
+            e_c_k = np.array([diff_c_xy[0] / d_c_xy,
+                               diff_c_xy[1] / d_c_xy,
+                               0.0])                  # world frame, Z=0
+        else:
+            # Sphere: 3-D distance gradient
+            e_c_k = (p_wc - c_k) / d_c              # world frame
+
         hat_p_co = p_co / p_co_norm             # camera frame: camera → object
         beta     = 1.0 - self._gamma / p_co_norm ** 2
 
@@ -356,24 +393,23 @@ class ErrorControlNode(Node):
 
         # [2] Occlusion avoidance (one constraint per obstacle)
         for i, obs in enumerate(self._obstacles):
-            print(obs)
             h_occ, A_occ = self._barrier_occ_k(p_co, obs)
             if h_occ is not None:
                 cons.append({'h': h_occ, 'A': A_occ, 'name': f'h_occ_{i}'})
 
         return cons
 
-    def _apply_cbf_qp(self, u_c_nom: np.ndarray, g_bar: np.ndarray
-                      ) -> np.ndarray:
+    def _apply_cbf_qp_with_cons(self, u_c_nom: np.ndarray,
+                                 cons: list) -> np.ndarray:
         """CBF-QP safety filter  (eq. 42, Kanno et al. 2024).
 
+        cons は _collect_constraints() の戻り値を渡す（呼び出し元で計算済み）。
         Solves:
             min_{u_c}  ½ ‖u_c − u_c_nom‖²
             s.t.       A_i @ u_c + α h_i(x) ≥ 0   for each barrier i
 
         Falls back to u_c_nom if all constraints are satisfied or solver fails.
         """
-        cons = self._collect_constraints(g_bar)
         if not cons:
             return u_c_nom
 
@@ -436,15 +472,44 @@ class ErrorControlNode(Node):
         # Nominal control law  (eq 7.15):  u_nom = −K ν
         u_nom   = -self._K @ nu
         u_c_nom = u_nom[:6]
-        u_e     = u_nom[6:]   # observer correction — not modified by CBF
 
+        # Observer correction u_e — published to VMO.
+        #
+        # The full N-matrix design gives:  u_e = ke · Ad_rot · e_c − ke · e_e
+        # The ke·Ad_rot·e_c term compensates for the camera's NOMINAL control
+        # motion (designed for V_wc = −Ad(g_d)·u_c_nom).  When CBF-QP modifies
+        # u_c → u_c_cbf, V_wc changes but this term does not — creating a
+        # persistent disturbance in ġ̄ that causes a constant steady-state
+        # observer error.
+        #
+        # Root cause: the observer is at the correct pose (g_bar = g_true) only
+        # when u_e = 0.  With the coupling term, u_e = ke·Ad_rot·e_c ≠ 0
+        # whenever the camera is still moving (e_c ≠ 0), which CBF guarantees
+        # permanently.
+        #
+        # Fix: decouple u_e from e_c.  The prediction step already uses the
+        # true (CBF-modified) V_wc, so the correction needs only the estimation
+        # error — giving u_e = 0 exactly when g_bar = g_true.
+        
+        # u_e = u_nom[6:] # theoretical input
+        u_e = -self._ke * self._e_e   # pure estimation feedback, CBF-robust
+        
         # ------ CBF-QP safety filter on u_c --------------------------
         if self._cbf_enabled:
-            u_c = self._apply_cbf_qp(u_c_nom, self._g_bar)
-
-            # Publish barrier values for monitoring
+            t0 = time.perf_counter()
             cbf_cons = self._collect_constraints(self._g_bar)
-            cbf_msg  = Float64MultiArray()
+            t1 = time.perf_counter()
+            u_c = self._apply_cbf_qp_with_cons(u_c_nom, cbf_cons)
+            t2 = time.perf_counter()
+
+            self.get_logger().info(
+                f'[CBF timing] constraints={1000*(t1-t0):.2f} ms  '
+                f'QP={1000*(t2-t1):.2f} ms  '
+                f'total={1000*(t2-t0):.2f} ms',
+                throttle_duration_sec=3.0,
+            )
+
+            cbf_msg      = Float64MultiArray()
             cbf_msg.data = [float(c['h']) for c in cbf_cons]
             self._pub_cbf.publish(cbf_msg)
         else:
